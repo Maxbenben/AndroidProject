@@ -225,7 +225,12 @@ class MainActivity : ComponentActivity() {
                                                 type = NavType.StringType
                                             },
                                         ),
-                                ) {
+                                ) { backStackEntry ->
+                                    val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
+
+                                    // 1. Создаем ViewModel для добавления участников, привязанный к экрану редактирования
+                                    val addParticipantViewModel: AddProjectParticipantViewModel =
+                                        viewModel(viewModelStoreOwner = backStackEntry)
                                     EditProjectRoute(
                                         onNavigateBack = { navController.popBackStack() },
                                         onProjectSaved = {
@@ -234,6 +239,10 @@ class MainActivity : ComponentActivity() {
                                         onProjectDeleted = {
                                             navController.popBackStack()
                                         },
+                                        onAddParticipantClick = {
+                                            navController.navigate("add_project_participant?projectId=$projectId")
+                                        },
+                                        addParticipantViewModel = addParticipantViewModel,
                                     )
                                 }
 
@@ -291,10 +300,10 @@ class MainActivity : ComponentActivity() {
                                             },
                                         ),
                                 ) { backStackEntry ->
-                                    val projectId =
-                                        backStackEntry.arguments?.getString("projectId").orEmpty()
+                                    val projectId = backStackEntry.arguments?.getString("projectId").orEmpty()
 
                                     if (projectId.isBlank()) {
+                                        // --- CREATE FLOW (Создание нового проекта) ---
                                         val createProjectEntry =
                                             remember(backStackEntry) {
                                                 runCatching { navController.getBackStackEntry(Screen.CREATE_PROJECT) }.getOrNull()
@@ -318,11 +327,33 @@ class MainActivity : ComponentActivity() {
                                             )
                                         }
                                     } else {
-                                        AddParticipantRoute(
-                                            projectId = projectId,
-                                            onBackClick = { navController.popBackStack() },
-                                            onInvited = { navController.popBackStack() },
-                                        )
+                                        // --- EDIT FLOW (Редактирование существующего проекта) ---
+                                        // Получаем backStackEntry экрана редактирования по его маршруту с ID
+                                        val editProjectRoute = "edit_project/$projectId"
+                                        val editProjectEntry =
+                                            remember(backStackEntry, projectId) {
+                                                runCatching { navController.getBackStackEntry(editProjectRoute) }.getOrNull()
+                                            }
+
+                                        if (editProjectEntry != null) {
+                                            // Берем тот же ViewModel, что и на экране редактирования
+                                            val addParticipantViewModel: AddProjectParticipantViewModel =
+                                                viewModel(viewModelStoreOwner = editProjectEntry)
+
+                                            AddParticipantRoute(
+                                                projectId = projectId,
+                                                onBackClick = { navController.popBackStack() },
+                                                onInvited = { navController.popBackStack() },
+                                                viewModel = addParticipantViewModel,
+                                            )
+                                        } else {
+                                            // Fallback (если экран редактирования потерялся из стека)
+                                            AddParticipantRoute(
+                                                projectId = projectId,
+                                                onBackClick = { navController.popBackStack() },
+                                                onInvited = { navController.popBackStack() },
+                                            )
+                                        }
                                     }
                                 }
 
