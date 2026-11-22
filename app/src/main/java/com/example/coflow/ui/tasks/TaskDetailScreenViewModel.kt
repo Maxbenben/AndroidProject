@@ -88,7 +88,7 @@ class TaskDetailScreenViewModel(
         }
     }
 
-        private fun loadTask() {
+    private fun loadTask() {
         observeJob?.cancel()
         observeJob =
             viewModelScope.launch {
@@ -111,7 +111,11 @@ class TaskDetailScreenViewModel(
 
                             val authorName =
                                 if (task.authorId.isNotBlank()) {
-                                    userRepository.getById(task.authorId).getOrNull()?.name.orEmpty()
+                                    userRepository
+                                        .getById(task.authorId)
+                                        .getOrNull()
+                                        ?.name
+                                        .orEmpty()
                                 } else {
                                     ""
                                 }
@@ -119,7 +123,11 @@ class TaskDetailScreenViewModel(
                             // ИСПРАВЛЕНИЕ: Разбиваем assigneeId по запятой (поддержка нескольких исполнителей)
                             val assigneesList = mutableListOf<String>()
                             if (task.assigneeId.isNotBlank()) {
-                                val assigneeIds = task.assigneeId.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                                val assigneeIds =
+                                    task.assigneeId
+                                        .split(",")
+                                        .map { it.trim() }
+                                        .filter { it.isNotBlank() }
                                 for (id in assigneeIds) {
                                     val assigneeUser = userRepository.getById(id).getOrNull()
                                     if (assigneeUser != null) {
@@ -132,7 +140,11 @@ class TaskDetailScreenViewModel(
                             val formattedDate = task.deadline.format(DateTimeFormatter.ofPattern("dd.MM.yy"))
 
                             val isAuthor = task.authorId == currentUid
-                            val isAssignee = task.assigneeId.split(",").map { it.trim() }.contains(currentUid)
+                            val isAssignee =
+                                task.assigneeId
+                                    .split(",")
+                                    .map { it.trim() }
+                                    .contains(currentUid)
                             val isProjectOwner = project?.ownerId == currentUid && currentUid.isNotBlank()
                             val canModifyTask = isAuthor || isAssignee || isProjectOwner
 
@@ -181,16 +193,19 @@ class TaskDetailScreenViewModel(
     }
 
     // --- Обработчики действий ---
-        fun onBottomActionClick() {
+    fun onBottomActionClick() {
         val current = _state.value
         if (current.isLoading || !current.showBottomAction) return
 
         val currentUid = authRepository.getCurrentUserUid().orEmpty()
+
+        if (current.status == TaskStatusUi.DONE) return
+
         val newStatus =
             when (current.status) {
                 TaskStatusUi.TODO -> TaskStatus.IN_PROGRESS
-                TaskStatusUi.IN_PROGRESS -> TaskStatusUi.DONE
-                TaskStatusUi.DONE -> return
+                TaskStatusUi.IN_PROGRESS -> TaskStatus.DONE
+                TaskStatusUi.DONE -> TaskStatus.DONE
             }
 
         viewModelScope.launch {

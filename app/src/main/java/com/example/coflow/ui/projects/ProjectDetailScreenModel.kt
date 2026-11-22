@@ -4,7 +4,9 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.coflow.R
+import com.example.coflow.models.ProjectModel
 import com.example.coflow.models.Role
+import com.example.coflow.models.UserModel
 import com.example.coflow.repositories.AuthRepository
 import com.example.coflow.repositories.FirebaseAuthRepositoryImpl
 import com.example.coflow.repositories.FirebaseMembershipRepositoryImpl
@@ -69,12 +71,11 @@ class ProjectDetailScreenViewModel(
     private val userRepository: UserRepository = FirebaseUserRepositoryImpl(),
     private val authRepository: AuthRepository = FirebaseAuthRepositoryImpl(),
 ) : ViewModel() {
-    object NavigateBack : UiEvent()
-
     private val _state = MutableStateFlow(ProjectDetailUiState())
     val state: StateFlow<ProjectDetailUiState> = _state.asStateFlow()
 
     private var membersObserverJob: Job? = null
+    private var projectObserverJob: Job? = null
 
     private val projectId: String = savedStateHandle.get<String>("projectId").orEmpty()
 
@@ -92,103 +93,115 @@ class ProjectDetailScreenViewModel(
     }
 
     private fun loadProject() {
-        viewModelScope.launch {
-            _state.update {
-                it.copy(isLoading = true, errorMessage = null, errorMessageResId = null)
-            }
-            try {
-                val currentUid = authRepository.getCurrentUserUid().orEmpty()
+        projectObserverJob?.cancel()
+        projectObserverJob =
+            viewModelScope.launch {
+                _state.update { it.copy(isLoading = true, errorMessage = null, errorMessageResId = null) }
+                try {
+                    val currentUid = authRepository.getCurrentUserUid().orEmpty()
 
-                val project =
-                    projectRepository.getById(projectId).getOrElse { error ->
-                        _state.update {
-                            it.copy(
-                                errorMessage = error.message,
-                                errorMessageResId = if (error.message == null) R.string.error_system else null,
-                            )
-                        }
-                        return@launch
+                    // СИНХРОНИЗАЦИЯ: Подписываемся на изменения самого проекта
+                    projectRepository.observeById(projectId).collect { result ->
+                        result.fold(
+                            onSuccess = { project ->
+                                val ownerUser =
+                                    project.ownerId
+                                        .takeIf { it.isNotBlank() }
+                                        ?.let { userRepository.getById(it).getOrNull() }
+                                val ownerName = ownerUser?.name.orEmpty()
+
+                                _state.update {
+                                    it.copy(
+                                        projectId = project.id,
+                                        title = project.title,
+                                        description = project.description,
+                                        status = if (project.isDeleted) ProjectStatusUi.ARCHIVED else ProjectStatusUi.IN_PROGRESS,
+                                        ownerName = ownerName,
+                                        canEdit = project.ownerId == currentUid,
+                                        isLoading = false,
+                                    )
+                                }
+
+                                // Подписку на участников запускаем только один раз
+                                if (membersObserverJob == null || membersObserverJob?.isActive == false) {
+                                    observeMembers(project, ownerUser)
+                                }
+                            },
+                            onFailure = { error ->
+                                _state.update {
+                                    it.copy(
+                                        isLoading = false,
+                                        errorMessage = error.message,
+                                        errorMessageResId = if (error.message == null) R.string.error_system else null,
+                                    )
+                                }
+                            },
+                        )
                     }
-
-                val ownerUser =
-                    project.ownerId
-                        .takeIf { it.isNotBlank() }
-                        ?.let { userRepository.getById(it).getOrNull() }
-                val ownerName = ownerUser?.name.orEmpty()
-
-                // Загружаем основную инфу о проекте (разово)
-                _state.update {
-                    it.copy(
-                        projectId = project.id,
-                        title = project.title,
-                        description = project.description,
-                        status = if (project.isDeleted) ProjectStatusUi.ARCHIVED else ProjectStatusUi.IN_PROGRESS,
-                        ownerName = ownerName,
-                        canEdit = project.ownerId == currentUid,
-                        isLoading = false,
-                    )
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    _state.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = e.message,
+                            errorMessageResId = if (e.message == null) R.string.error_system else null,
+                        )
+                    }
                 }
+            }
+    }
 
-                // СИНХРОНИЗАЦИЯ: Подписываемся на изменения участников
-                membersObserverJob?.cancel()
-                membersObserverJob =
-                    viewModelScope.launch {
-                        membershipRepository.observeByProjectId(projectId).collect { result ->
-                            result.fold(
-                                onSuccess = { memberships ->
-                                    val participantsList = mutableListOf<ProjectParticipantUi>()
+    // Выносим подписку на участников в отдельный метод, чтобы не переподписываться при каждом обновлении названия
+    private fun observeMembers(
+        project: ProjectModel,
+        ownerUser: UserModel?,
+    ) {
+        membersObserverJob?.cancel()
+        membersObserverJob =
+            viewModelScope.launch {
+                membershipRepository.observeByProjectId(projectId).collect { result ->
+                    result.fold(
+                        onSuccess = { memberships ->
+                            val participantsList = mutableListOf<ProjectParticipantUi>()
 
-                                    // Добавляем владельца (если он найден)
-                                    ownerUser?.let {
-                                        participantsList +=
-                                            ProjectParticipantUi(
-                                                uid = it.uid,
-                                                name = it.name,
-                                                email = it.email,
-                                                initials = getInitials(it.name),
-                                                role = Role.OWNER,
-                                            )
-                                    }
+                            ownerUser?.let {
+                                participantsList +=
+                                    ProjectParticipantUi(
+                                        uid = it.uid,
+                                        name = it.name,
+                                        email = it.email,
+                                        initials = getInitials(it.name),
+                                        role = Role.OWNER,
+                                    )
+                            }
 
-                                    // Добавляем остальных участников
-                                    memberships.filter { it.userId != project.ownerId }.forEach { membership ->
-                                        userRepository.getById(membership.userId).getOrNull()?.let { user ->
-                                            participantsList +=
-                                                ProjectParticipantUi(
-                                                    uid = user.uid,
-                                                    name = user.name,
-                                                    email = user.email,
-                                                    initials = getInitials(user.name),
-                                                    role = membership.role,
-                                                )
-                                        }
-                                    }
-
-                                    _state.update { it.copy(participants = participantsList) }
-                                },
-                                onFailure = { error ->
-                                    _state.update {
-                                        it.copy(
-                                            errorMessage = error.message,
-                                            errorMessageResId = if (error.message == null) R.string.error_load_projects else null,
+                            memberships.filter { it.userId != project.ownerId }.forEach { membership ->
+                                userRepository.getById(membership.userId).getOrNull()?.let { user ->
+                                    participantsList +=
+                                        ProjectParticipantUi(
+                                            uid = user.uid,
+                                            name = user.name,
+                                            email = user.email,
+                                            initials = getInitials(user.name),
+                                            role = membership.role,
                                         )
-                                    }
-                                },
-                            )
-                        }
-                    }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        isLoading = false,
-                        errorMessage = e.message,
-                        errorMessageResId = if (e.message == null) R.string.error_system else null,
+                                }
+                            }
+
+                            _state.update { it.copy(participants = participantsList) }
+                        },
+                        onFailure = { error ->
+                            _state.update {
+                                it.copy(
+                                    errorMessage = error.message,
+                                    errorMessageResId = if (error.message == null) R.string.error_load_projects else null,
+                                )
+                            }
+                        },
                     )
                 }
             }
-        }
     }
 
     fun onSearchQueryChange(query: String) {

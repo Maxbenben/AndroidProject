@@ -116,6 +116,7 @@ class EditTaskViewModel(
     val state: StateFlow<EditTaskUiState> = _state.asStateFlow()
 
     private var taskObserverJob: Job? = null
+    private var loadedTask: TaskModel? = null
 
     // Читаем taskId напрямую из аргументов навигации "edit_task/{taskId}"
     val taskId = savedStateHandle.get<String>("taskId").orEmpty()
@@ -143,115 +144,104 @@ class EditTaskViewModel(
         taskObserverJob =
             viewModelScope.launch {
                 _state.update { it.copy(isLoading = true, errorMessage = null, errorMessageResId = null) }
-                val currentUid = authRepository.getCurrentUserUid().orEmpty()
+                try {
+                    val currentUid = authRepository.getCurrentUserUid().orEmpty()
 
-                taskRepository.observeById(taskId).collect { result ->
-                    result.fold(
-                        onSuccess = { task ->
-                            // Проверяем, первая ли это загрузка.
-                            // Если пользователь уже начал редактировать, мы не должны затирать его ввод.
-                            val isFirstLoad = _state.value.isLoading
+                    taskRepository.observeById(taskId).collect { result ->
+                        result.fold(
+                            onSuccess = { task ->
+                                // ВАЖНО: Сохраняем задачу для NotificationSender
+                                loadedTask = task
 
-                            if (isFirstLoad) {
-                                val projectName =
-                                    if (task.projectId.isNotBlank()) {
-                                        projectRepository
-                                            .getById(task.projectId)
-                                            .getOrNull()
-                                            ?.title
-                                            .orEmpty()
-                                    } else {
-                                        ""
-                                    }
+                                // Проверяем, первая ли это загрузка.
+                                // Если пользователь уже начал редактировать, мы не должны затирать его ввод.
+                                val isFirstLoad = _state.value.isLoading
 
-                                val assigneeNames = mutableListOf<String>()
-                                if (task.assigneeId.isNotBlank()) {
-                                    val assigneeUser = userRepository.getById(task.assigneeId).getOrNull()
-                                    if (assigneeUser != null) {
-                                        assigneeNames.add(if (assigneeUser.uid == currentUid) "Ты" else assigneeUser.name)
-                                    }
-                                }
+                                if (isFirstLoad) {
+                                    val projectName =
+                                        if (task.projectId.isNotBlank()) {
+                                            projectRepository
+                                                .getById(task.projectId)
+                                                .getOrNull()
+                                                ?.title
+                                                .orEmpty()
+                                        } else {
+                                            ""
+                                        }
 
-                                val formattedDate = task.deadline.format(DateTimeFormatter.ofPattern("dd.MM.yy"))
-                                val parsedDeadline = task.deadline.toLocalDate()
-
-                                _state.update {
-                                    it.copy(
-                                        taskId = task.id,
-                                        title = task.title,
-                                        description = task.description,
-                                        assignees = assigneeNames.joinToString(", "),
-                                        project = projectName,
-                                        selectedProjectId = task.projectId,
-                                        pendingProject = projectName,
-                                        pendingProjectId = task.projectId,
-                                        dueDate = formattedDate,
-                                        selectedDueDate = parsedDeadline,
-                                        calendarMonth = YearMonth.from(parsedDeadline),
-                                        canSave = task.title.isNotBlank() && formattedDate.isNotBlank(),
-                                        isLoading = false,
-                                        pendingAssigneeIds =
+                                    // ИСПРАВЛЕНИЕ: Разбиваем assigneeId по запятой (поддержка нескольких исполнителей)
+                                    val assigneeNames = mutableListOf<String>()
+                                    val ids =
+                                        task.assigneeId
+                                            .split(",")
+                                            .map { it.trim() }
+                                            .filter { it.isNotBlank() }
+                                    if (task.assigneeId.isNotBlank()) {
+                                        val ids =
                                             task.assigneeId
                                                 .split(",")
                                                 .map { it.trim() }
                                                 .filter { it.isNotBlank() }
-                                                .toSet(),
+                                        for (id in ids) {
+                                            val user = userRepository.getById(id).getOrNull()
+                                            if (user != null) {
+                                                assigneeNames.add(if (user.uid == currentUid) "Ты" else user.name)
+                                            }
+                                        }
+                                    }
+
+                                    val formattedDate = task.deadline.format(DateTimeFormatter.ofPattern("dd.MM.yy"))
+                                    val parsedDeadline = task.deadline.toLocalDate()
+
+                                    _state.update {
+                                        it.copy(
+                                            taskId = task.id,
+                                            title = task.title,
+                                            description = task.description,
+                                            assignees = assigneeNames.joinToString(", "),
+                                            project = projectName,
+                                            selectedProjectId = task.projectId,
+                                            pendingProject = projectName,
+                                            pendingProjectId = task.projectId,
+                                            dueDate = formattedDate,
+                                            selectedDueDate = parsedDeadline,
+                                            calendarMonth = YearMonth.from(parsedDeadline),
+                                            canSave = task.title.isNotBlank() && formattedDate.isNotBlank(),
+                                            isLoading = false,
+                                            pendingAssigneeIds = ids.toSet(),
+                                        )
+                                    }
+                                    initialAssigneeIds = _state.value.pendingAssigneeIds
+                                    loadAssignees(task.projectId)
+                                } else {
+                                    // Если пришло обновление извне (например, статус изменили на другом экране),
+                                    // просто обновляем стейт, чтобы не сбить текущее редактирование.
+                                    _state.update { it.copy(isLoading = false) }
+                                }
+                            },
+                            onFailure = { error ->
+                                _state.update {
+                                    it.copy(
+                                        isLoading = false,
+                                        errorMessage = error.message,
+                                        errorMessageResId = if (error.message == null) R.string.error_load_task else null,
                                     )
                                 }
-                                loadAssignees(task.projectId)
-                            } else {
-                                // Если это обновление извне (например, кто-то изменил статус на другом экране),
-                                // просто обновляем стейт, чтобы не сбить текущее редактирование.
-                                _state.update { it.copy(isLoading = false) }
-                            }
-                        },
-                        onFailure = { error ->
-                            _state.update {
-                                it.copy(
-                                    isLoading = false,
-                                    errorMessage = error.message,
-                                    errorMessageResId = if (error.message == null) R.string.error_load_task else null,
-                                )
-                            }
-                        },
-                    )
+                            },
+                        )
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    _state.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = e.message,
+                            errorMessageResId = if (e.message == null) R.string.error_load_task else null,
+                        )
+                    }
                 }
             }
-
-            // 5. Формат даты
-            val formattedDate =
-                task.deadline.format(DateTimeFormatter.ofPattern("dd.MM.yy"))
-
-            val parsedDeadline = task.deadline.toLocalDate()
-
-            // 6. Публикуем в state
-            _state.update {
-                it.copy(
-                    taskId = task.id,
-                    title = task.title,
-                    description = task.description,
-                    assignees = assigneeNames.joinToString(", "),
-                    project = projectName,
-                    selectedProjectId = task.projectId,
-                    pendingProject = projectName,
-                    pendingProjectId = task.projectId,
-                    dueDate = formattedDate,
-                    selectedDueDate = parsedDeadline,
-                    calendarMonth = YearMonth.from(parsedDeadline),
-                    canSave = task.title.isNotBlank() && formattedDate.isNotBlank(),
-                    isLoading = false,
-                    errorMessage = null,
-                    pendingAssigneeIds =
-                        task.assigneeId
-                            .split(",")
-                            .map { it.trim() }
-                            .filter { it.isNotBlank() }
-                            .toSet(),
-                )
-            }
-            initialAssigneeIds = _state.value.pendingAssigneeIds
-            loadAssignees(task.projectId)
-        }
     }
 
     private var loadedProjectId: String = "" // запомним проект задачи для фильтрации исполнителей
