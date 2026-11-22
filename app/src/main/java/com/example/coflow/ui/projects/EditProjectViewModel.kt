@@ -16,6 +16,7 @@ import com.example.coflow.repositories.FirebaseUserRepositoryImpl
 import com.example.coflow.repositories.MembershipRepository
 import com.example.coflow.repositories.ProjectRepository
 import com.example.coflow.repositories.UserRepository
+import com.example.coflow.repositories.dto.MembershipAddDto
 import com.example.coflow.repositories.dto.MembershipUpdateDto
 import com.example.coflow.repositories.dto.ProjectUpdateDto
 import kotlinx.coroutines.Job
@@ -41,6 +42,8 @@ data class EditProjectUiState(
     val title: String = "",
     val description: String = "",
     val members: List<ProjectMemberUi> = emptyList(),
+    // Участники, добавленные через экран добавления и ещё не сохранённые
+    val newParticipants: List<ProjectParticipant> = emptyList(),
     val isLoading: Boolean = true,
     val isSaving: Boolean = false,
     val isDeleting: Boolean = false,
@@ -49,6 +52,7 @@ data class EditProjectUiState(
     val isProjectDeleted: Boolean = false,
     val errorMessage: String? = null,
     val errorMessageResId: Int? = null,
+    val unresolvedEmails: List<String> = emptyList(),
 ) {
     val descriptionLength: Int get() = description.length
 
@@ -256,7 +260,33 @@ class EditProjectViewModel(
         }
     }
 
-    // Сохранение и удаление проекта
+    // --- Новые участники: синхронизация с AddProjectParticipantViewModel ---
+
+    fun syncNewParticipants(items: List<ProjectParticipantItem>) {
+        _state.update { current ->
+            // Отфильтровываем тех, кто уже является участником проекта
+            val existingEmails = current.members.map { it.email.lowercase() }.toSet()
+            current.copy(
+                newParticipants =
+                    items
+                        .filter { it.email.lowercase() !in existingEmails }
+                        .map { ProjectParticipant(email = it.email, initials = it.initials) },
+            )
+        }
+    }
+
+    fun onRemoveNewParticipant(participant: ProjectParticipant) {
+        _state.update { current ->
+            current.copy(
+                newParticipants =
+                    current.newParticipants.filterNot {
+                        it.email.equals(participant.email, ignoreCase = true)
+                    },
+            )
+        }
+    }
+
+    // --- Сохранение и удаление проекта ---
 
     fun onSaveClick() {
         val current = _state.value
@@ -278,6 +308,17 @@ class EditProjectViewModel(
                     )
                 projectRepository.updateProject(current.projectId, updateDto).fold(
                     onSuccess = { updated ->
+                        // 1. Добавляем новых участников (как в CreateProjectViewModel)
+                        val unresolved = addNewParticipants(current.projectId, current.newParticipants)
+
+                        // 2. Перезагружаем список участников, чтобы отобразить добавленных
+                        val currentUid = authRepository.getCurrentUserUid()
+                        val refreshedMemberships =
+                            membershipRepository.getByProjectId(current.projectId).getOrNull()
+                        val membersUi =
+                            refreshedMemberships?.map { buildMemberUi(it, currentUid) }
+                                ?: current.members
+
                         // Уведомляем до isProjectSaved: по этому флагу экран
                         // закрывается, а вместе с ним отменяется viewModelScope.
                         val changed =
@@ -298,6 +339,9 @@ class EditProjectViewModel(
                             it.copy(
                                 title = updated.title,
                                 description = updated.description,
+                                members = membersUi,
+                                newParticipants = emptyList(),
+                                unresolvedEmails = unresolved,
                                 isProjectSaved = true,
                             )
                         }
@@ -312,6 +356,37 @@ class EditProjectViewModel(
                 _state.update { it.copy(isSaving = false) }
             }
         }
+    }
+
+    private suspend fun addNewParticipants(
+        projectId: String,
+        participants: List<ProjectParticipant>,
+    ): List<String> {
+        if (participants.isEmpty()) return emptyList()
+        val unresolved = mutableListOf<String>()
+
+        participants.forEach { participant ->
+            try {
+                val user = userRepository.getByEmail(participant.email).getOrNull()
+                if (user == null || user.isDeleted || user.uid.isBlank()) {
+                    unresolved += participant.email
+                    return@forEach
+                }
+                membershipRepository
+                    .addMember(
+                        MembershipAddDto(
+                            projectId = projectId,
+                            userId = user.uid,
+                            role = Role.MEMBER,
+                        ),
+                    ).onFailure { unresolved += participant.email }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                unresolved += participant.email
+            }
+        }
+        return unresolved
     }
 
     fun consumeProjectSaved() {

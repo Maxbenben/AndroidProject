@@ -244,7 +244,6 @@ private fun ParticipantsCard(
             color = CoFlowColors.TextPrimary,
         )
 
-        // Добавление участника — заглушка, позже откроется отдельное окно.
         Row(
             modifier =
                 Modifier

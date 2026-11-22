@@ -227,14 +227,12 @@ fun TasksScreen(
                             selectedFilters = state.selectedFilters,
                             availableFilters = state.availableFilters,
                         )
-//                        Spacer(Modifier.width(16.dp))
 
                         CoFlowFabButton(
                             onClick = onNavigateToCreateTask,
                             iconName = "task_plus",
                         )
                     }
-//                    Spacer(Modifier.height(7.dp))
                 }
             }
         }
